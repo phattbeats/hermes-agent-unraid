@@ -2,7 +2,7 @@ name: Sync Fork with Upstream
 
 on:
   schedule:
-    # Run every 24 hours at midnight UTC
+    # Sync every 24 hours at midnight UTC
     - cron: '0 0 * * *'
   workflow_dispatch:  # Allow manual trigger
 
@@ -30,14 +30,56 @@ jobs:
           git remote add upstream https://github.com/NousResearch/hermes-agent.git
           git fetch upstream
 
-      - name:Merge upstream main into my main
+      - name: Check for upstream changes
+        id: check
+        run: |
+          # Count commits behind upstream
+          BEHIND=$(git rev-list --count HEAD..upstream/main)
+          echo "Commits behind upstream: $BEHIND"
+          echo "behind=$BEHIND" >> $GITHUB_OUTPUT
+          if [ "$BEHIND" -gt "0" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Merge upstream main into my main
+        if: steps.check.outputs.has_changes == 'true'
         run: |
           git checkout main
-          # Merge upstream main into my main
-          # Use --no-edit because we want a clean merge, no commit message editing
-          # Use --autostash to handle any local changes by stashing them first
           git merge upstream/main --no-edit --autostash
 
       - name: Push to my fork
+        if: steps.check.outputs.has_changes == 'true'
         run: |
           git push origin main
+
+      # Tag with version if upstream has a new release tag
+      - name: Check for new upstream tags
+        if: steps.check.outputs.has_changes == 'true'
+        id: new_tag
+        run: |
+          # Get the latest tag from upstream
+          UPSTREAM_TAG=$(git describe --tags upstream/main 2>/dev/null | sed 's/^v//')
+          echo "Latest upstream tag: $UPSTREAM_TAG"
+          echo "tag=v${UPSTREAM_TAG:-latest}" >> $GITHUB_OUTPUT
+
+      - name: Tag and push version tag
+        if: steps.check.outputs.has_changes == 'true' && steps.new_tag.outputs.tag != ''
+        run: |
+          git tag -f "${{ steps.new_tag.outputs.tag }}"
+          git push origin "${{ steps.new_tag.outputs.tag }}" --force 2>/dev/null || true
+
+  trigger-docker:
+    needs: sync
+    runs-on: ubuntu-latest
+    if: needs.sync.outputs.has_changes == 'true' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    steps:
+      - name: Trigger Docker Hub build
+        run: |
+          echo "Synced successfully — triggering Docker Hub build"
+          gh workflow run "Build and Push to Docker Hub" --repo phattbeats/hermes-agent-unraid
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
