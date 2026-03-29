@@ -70,16 +70,28 @@ jobs:
           git tag -f "${{ steps.new_tag.outputs.tag }}"
           git push origin "${{ steps.new_tag.outputs.tag }}" --force 2>/dev/null || true
 
+      # Output: did we actually merge anything?
+      - name: Set merged output
+        id: merged
+        run: |
+          # Check if HEAD matches upstream (no merge happened)
+          if git diff --quiet HEAD upstream/main 2>/dev/null; then
+            echo "result=no" >> $GITHUB_OUTPUT
+          else
+            echo "result=yes" >> $GITHUB_OUTPUT
+          fi
+
   trigger-docker:
-    needs: sync
+    needs: [sync, merged]
     runs-on: ubuntu-latest
-    if: needs.sync.outputs.has_changes == 'true' || github.event_name == 'workflow_dispatch'
+    # Only fire when: (a) workflow_dispatch triggered this, OR (b) a real merge happened)
+    if: github.event_name == 'workflow_dispatch' || needs.merged.outputs.result == 'yes'
     permissions:
       contents: read
     steps:
       - name: Trigger Docker Hub build
         run: |
-          echo "Synced successfully — triggering Docker Hub build"
+          echo "Changes synced — triggering Docker Hub build"
           gh workflow run "Build and Push to Docker Hub" --repo phattbeats/hermes-agent-unraid
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
