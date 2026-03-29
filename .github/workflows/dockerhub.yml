@@ -1,9 +1,9 @@
 name: Build and Push to Docker Hub
 
 on:
-  # Only build on version tags (v1.2.3) or manual trigger
-  tags:
-    - 'v*'
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 env:
