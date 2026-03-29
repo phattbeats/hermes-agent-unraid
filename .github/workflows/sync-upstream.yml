@@ -1,0 +1,38 @@
+name: Sync Fork with Upstream
+
+on:
+  schedule:
+    # Run every 24 hours at midnight UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout my fork
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git
+          git fetch upstream
+
+      - name:Merge upstream main into my main
+        run: |
+          git checkout main
+          # Merge upstream main into my main
+          # Use --no-edit because we want a clean merge, no commit message editing
+          # Use --autostash to handle any local changes by stashing them first
+          git merge upstream/main --no-edit --autostash
+
+      - name: Push to my fork
+        run: |
+          git push origin main
