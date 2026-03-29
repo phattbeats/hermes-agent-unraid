@@ -178,7 +178,7 @@ A multi-arch Docker image is available for Unraid and Docker-native deployments.
 
 In Unraid Docker settings, add container using:
 ```
-docker.io/phattbeats/hermes-agent:latest
+docker.io/therealphatt/hermes-agent:latest
 ```
 
 Or use Docker Compose:
@@ -187,7 +187,7 @@ Or use Docker Compose:
 version: "3.8"
 services:
   hermes-agent:
-    image: docker.io/phattbeats/hermes-agent:latest
+    image: docker.io/therealphatt/hermes-agent:latest
     container_name: hermes-agent
     restart: unless-stopped
     ports:
