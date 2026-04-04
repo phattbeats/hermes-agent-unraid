@@ -16,6 +16,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      merged: ${{ steps.merged.outputs.result }}
+      new_tag: ${{ steps.new_tag.outputs.tag }}
 
     steps:
       - name: Checkout my fork
@@ -46,6 +49,8 @@ jobs:
       - name: Merge upstream main into my main
         if: steps.check.outputs.has_changes == 'true'
         run: |
+          git config user.name "phattbeats"
+          git config user.email "brandon@phatt.tech"
           git checkout main
           git merge upstream/main --no-edit --autostash
 
@@ -74,18 +79,17 @@ jobs:
       - name: Set merged output
         id: merged
         run: |
-          # Check if HEAD matches upstream (no merge happened)
-          if git diff --quiet HEAD upstream/main 2>/dev/null; then
-            echo "result=no" >> $GITHUB_OUTPUT
-          else
+          if [ "${{ steps.check.outputs.has_changes }}" == "true" ]; then
             echo "result=yes" >> $GITHUB_OUTPUT
+          else
+            echo "result=no" >> $GITHUB_OUTPUT
           fi
 
   trigger-docker:
-    needs: [sync, merged]
+    needs: [sync]
     runs-on: ubuntu-latest
-    # Only fire when: (a) workflow_dispatch triggered this, OR (b) a real merge happened)
-    if: github.event_name == 'workflow_dispatch' || needs.merged.outputs.result == 'yes'
+    # Only fire when: (a) workflow_dispatch triggered this, OR (b) a real merge happened
+    if: github.event_name == 'workflow_dispatch' || needs.sync.outputs.merged == 'yes'
     permissions:
       contents: read
     steps:
