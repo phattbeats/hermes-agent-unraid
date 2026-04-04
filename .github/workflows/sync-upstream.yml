@@ -98,4 +98,4 @@ jobs:
           echo "Changes synced — triggering Docker Hub build"
           gh workflow run "Build and Push to Docker Hub" --repo phattbeats/hermes-agent-unraid
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PAT }}
