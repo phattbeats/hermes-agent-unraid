@@ -4488,6 +4488,29 @@ class AIAgent:
                     pass
                 raise InterruptedError("Agent interrupted during streaming API call")
         if result["error"] is not None:
+            if deltas_were_sent["yes"]:
+                # Streaming failed AFTER some tokens were already delivered to
+                # the platform.  Re-raising would let the outer retry loop make
+                # a new API call, creating a duplicate message.  Return a
+                # partial "stop" response instead so the outer loop treats this
+                # turn as complete (no retry, no fallback).
+                logger.warning(
+                    "Partial stream delivered before error; returning stub "
+                    "response to prevent duplicate messages: %s",
+                    result["error"],
+                )
+                _stub_msg = SimpleNamespace(
+                    role="assistant", content=None, tool_calls=None,
+                    reasoning_content=None,
+                )
+                return SimpleNamespace(
+                    id="partial-stream-stub",
+                    model=getattr(self, "model", "unknown"),
+                    choices=[SimpleNamespace(
+                        index=0, message=_stub_msg, finish_reason="stop",
+                    )],
+                    usage=None,
+                )
             raise result["error"]
         return result["response"]
 
@@ -6625,10 +6648,17 @@ class AIAgent:
 
         # Plugin hook: pre_llm_call
         # Fired once per turn before the tool-calling loop.  Plugins can
-        # return a dict with a ``context`` key whose value is a string
-        # that will be appended to the ephemeral system prompt for every
-        # API call in this turn (not persisted to session DB or cache).
-        _plugin_turn_context = ""
+        # return a dict with a ``context`` key (or a plain string) whose
+        # value is appended to the current turn's user message.
+        #
+        # Context is ALWAYS injected into the user message, never the
+        # system prompt.  This preserves the prompt cache prefix — the
+        # system prompt stays identical across turns so cached tokens
+        # are reused.  The system prompt is Hermes's territory; plugins
+        # contribute context alongside the user's input.
+        #
+        # All injected context is ephemeral (not persisted to session DB).
+        _plugin_user_context = ""
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
             _pre_results = _invoke_hook(
@@ -6640,14 +6670,14 @@ class AIAgent:
                 model=self.model,
                 platform=getattr(self, "platform", None) or "",
             )
-            _ctx_parts = []
+            _ctx_parts: list[str] = []
             for r in _pre_results:
                 if isinstance(r, dict) and r.get("context"):
                     _ctx_parts.append(str(r["context"]))
                 elif isinstance(r, str) and r.strip():
                     _ctx_parts.append(r)
             if _ctx_parts:
-                _plugin_turn_context = "\n\n".join(_ctx_parts)
+                _plugin_user_context = "\n\n".join(_ctx_parts)
         except Exception as exc:
             logger.warning("pre_llm_call hook failed: %s", exc)
 
@@ -6666,10 +6696,12 @@ class AIAgent:
         # External memory provider: prefetch once before the tool loop.
         # Reuse the cached result on every iteration to avoid re-calling
         # prefetch_all() on each tool call (10 tool calls = 10x latency + cost).
+        # Use original_user_message (clean input) — user_message may contain
+        # injected skill content that bloats / breaks provider queries.
         _ext_prefetch_cache = ""
         if self._memory_manager:
             try:
-                _query = user_message if isinstance(user_message, str) else ""
+                _query = original_user_message if isinstance(original_user_message, str) else ""
                 _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
             except Exception:
                 pass
@@ -6733,11 +6765,21 @@ class AIAgent:
             for idx, msg in enumerate(messages):
                 api_msg = msg.copy()
 
-                # External memory provider prefetch: inject cached recalled context
-                if idx == current_turn_user_idx and msg.get("role") == "user" and _ext_prefetch_cache:
-                    _base = api_msg.get("content", "")
-                    if isinstance(_base, str):
-                        api_msg["content"] = _base + "\n\n" + _ext_prefetch_cache
+                # Inject ephemeral context into the current turn's user message.
+                # Sources: memory manager prefetch + plugin pre_llm_call hooks
+                # with target="user_message" (the default).  Both are
+                # API-call-time only — the original message in `messages` is
+                # never mutated, so nothing leaks into session persistence.
+                if idx == current_turn_user_idx and msg.get("role") == "user":
+                    _injections = []
+                    if _ext_prefetch_cache:
+                        _injections.append(_ext_prefetch_cache)
+                    if _plugin_user_context:
+                        _injections.append(_plugin_user_context)
+                    if _injections:
+                        _base = api_msg.get("content", "")
+                        if isinstance(_base, str):
+                            api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
 
                 # For ALL assistant messages, pass reasoning back to the API
                 # This ensures multi-turn reasoning context is preserved
@@ -6771,9 +6813,10 @@ class AIAgent:
             effective_system = active_system_prompt or ""
             if self.ephemeral_system_prompt:
                 effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
-            # Plugin context from pre_llm_call hooks — ephemeral, not cached.
-            if _plugin_turn_context:
-                effective_system = (effective_system + "\n\n" + _plugin_turn_context).strip()
+            # NOTE: Plugin context from pre_llm_call hooks is injected into the
+            # user message (see injection block above), NOT the system prompt.
+            # This is intentional — system prompt modifications break the prompt
+            # cache prefix.  The system prompt is reserved for Hermes internals.
             if effective_system:
                 api_messages = [{"role": "system", "content": effective_system}] + api_messages
 
@@ -8643,11 +8686,13 @@ class AIAgent:
             _should_review_skills = True
             self._iters_since_skill = 0
 
-        # External memory provider: sync the completed turn + queue next prefetch
-        if self._memory_manager and final_response and user_message:
+        # External memory provider: sync the completed turn + queue next prefetch.
+        # Use original_user_message (clean input) — user_message may contain
+        # injected skill content that bloats / breaks provider queries.
+        if self._memory_manager and final_response and original_user_message:
             try:
-                self._memory_manager.sync_all(user_message, final_response)
-                self._memory_manager.queue_prefetch_all(user_message)
+                self._memory_manager.sync_all(original_user_message, final_response)
+                self._memory_manager.queue_prefetch_all(original_user_message)
             except Exception:
                 pass
 
